@@ -141,7 +141,7 @@ Can_ErrorID_T write_can_wheel_speed(void) {
 
 Can_ErrorID_T write_can_heartbeat(void) {
     Can_RearCanNode_Heartbeat_T msg;
-
+    msg.is_alive = true;
     return Can_RearCanNode_Heartbeat_Write(&msg);
 }
 
