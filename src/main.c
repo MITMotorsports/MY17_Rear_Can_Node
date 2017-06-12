@@ -18,6 +18,8 @@ const uint32_t OscRateIn = 12000000;
 #define HEARTBEAT_PERIOD_MS 1000
 #define WHEEL_SPEED_PERIOD_MS 20
 
+#define CLICK_TIMEOUT_MS 1000
+
 // 48 MHz (for 32 bit interrupts) = 48M cycles per second
 #define CYCLES_PER_MICROSECOND 48
 // Microsecond = 1 millionth of a second
@@ -39,12 +41,15 @@ volatile uint32_t wheel_2_clock_cycles_between_ticks = 0;
 uint32_t last_heartbeat_ms = 0;
 uint32_t last_wheel_speed_ms = 0;
 
+volatile uint32_t last_wheel_1_click = 0;
+volatile uint32_t last_wheel_2_click = 0;
+
 static bool resettingPeripheral = false;
 
 void handle_can_error(Can_ErrorID_T error);
 Can_ErrorID_T write_can_heartbeat(void);
 Can_ErrorID_T write_can_wheel_speed(void);
-uint32_t click_time_to_mRPM(uint32_t click_time);
+uint32_t click_time_to_mRPM(uint32_t click_time, uint32_t last_click);
 
 /*****************************************************************************/
 
@@ -62,6 +67,7 @@ void TIMER32_0_IRQHandler(void) {
   Chip_TIMER_Reset(LPC_TIMER32_0);            /* Reset the timer immediately */
   Chip_TIMER_ClearCapture(LPC_TIMER32_0, 0);      /* Clear the capture */
   wheel_1_clock_cycles_between_ticks = Chip_TIMER_ReadCapture(LPC_TIMER32_0, 0);
+  last_wheel_1_click = msTicks;
   Serial_Println("Wheel 1");
 }
 
@@ -71,6 +77,7 @@ void TIMER32_1_IRQHandler(void) {
   Chip_TIMER_Reset(LPC_TIMER32_1);            /* Reset the timer immediately */
   Chip_TIMER_ClearCapture(LPC_TIMER32_1, 0);      /* Clear the capture */
   wheel_2_clock_cycles_between_ticks = Chip_TIMER_ReadCapture(LPC_TIMER32_1, 0);
+  last_wheel_2_click = msTicks;
   Serial_Println("Wheel 2");
 }
 
@@ -133,8 +140,8 @@ Can_ErrorID_T write_can_wheel_speed(void) {
 
     Can_RearCanNode_WheelSpeed_T msg;
 
-    msg.rear_left_wheel_speed_mRPM = click_time_to_mRPM(left_click_time);
-    msg.rear_right_wheel_speed_mRPM = click_time_to_mRPM(right_click_time);
+    msg.rear_left_wheel_speed_mRPM = click_time_to_mRPM(left_click_time, last_wheel_1_click);
+    msg.rear_right_wheel_speed_mRPM = click_time_to_mRPM(right_click_time, last_wheel_2_click);
 
     return Can_RearCanNode_WheelSpeed_Write(&msg);
 }
@@ -145,8 +152,8 @@ Can_ErrorID_T write_can_heartbeat(void) {
     return Can_RearCanNode_Heartbeat_Write(&msg);
 }
 
-uint32_t click_time_to_mRPM(uint32_t cycles_per_click) {
-  if (cycles_per_click == 0) {
+uint32_t click_time_to_mRPM(uint32_t cycles_per_click, uint32_t last_click) {
+  if (cycles_per_click == 0 || last_click + CLICK_TIMEOUT_MS < msTicks) {
     return 0;
   }
 
