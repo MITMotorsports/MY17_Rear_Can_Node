@@ -27,7 +27,7 @@ const uint32_t OscRateIn = 12000000;
 // 1000 millirevs = 1 rev
 #define MILLIREVS_PER_REV_F 1000.0
 // TODO count number of teeth on wheel
-#define CLICKS_PER_REV 23
+#define CLICKS_PER_REV 27
 // Pointless comment to not break pattern
 #define SECONDS_PER_MINUTE 60
 
