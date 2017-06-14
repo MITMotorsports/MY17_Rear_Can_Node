@@ -18,7 +18,7 @@ const uint32_t OscRateIn = 12000000;
 #define HEARTBEAT_PERIOD_MS 1000
 #define WHEEL_SPEED_PERIOD_MS 20
 
-#define WHEEL_SPEED_TIMEOUT_MS 1000
+#define WHEEL_SPEED_TIMEOUT_MS 100
 
 // 48 MHz (for 32 bit interrupts) = 48M cycles per second
 #define CYCLES_PER_MICROSECOND 48
