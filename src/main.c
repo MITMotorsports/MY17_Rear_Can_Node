@@ -203,15 +203,14 @@ Can_ErrorID_T write_can_heartbeat(void) {
 }
 
 uint32_t click_time_to_mRPM(uint32_t cycles_per_click) {
-  const uint32_t us_per_click = cycles_per_click / CYCLES_PER_MICROSECOND;
-  const uint32_t us_per_rev = us_per_click * CLICKS_PER_REV;
+  const float us_per_click = cycles_per_click * 1.0 / CYCLES_PER_MICROSECOND;
+  const float us_per_rev = us_per_click * CLICKS_PER_REV;
 
   const float s_per_rev = us_per_rev / MICROSECONDS_PER_SECOND_F;
 
-  const uint32_t mrev_per_s = (uint32_t)
-    (MILLIREVS_PER_REV_F / s_per_rev);
+  const float mrev_per_s = MILLIREVS_PER_REV_F / s_per_rev;
 
-  const uint32_t mrev_per_min = mrev_per_s * SECONDS_PER_MINUTE;
-  return mrev_per_min;
+  const float mrev_per_min = mrev_per_s * SECONDS_PER_MINUTE;
+  return (uint32_t)(mrev_per_min);
 }
 
