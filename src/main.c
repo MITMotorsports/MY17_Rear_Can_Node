@@ -18,16 +18,22 @@ const uint32_t OscRateIn = 12000000;
 #define HEARTBEAT_PERIOD_MS 1000
 #define WHEEL_SPEED_PERIOD_MS 20
 
+typedef enum {
+  RIGHT,
+  LEFT,
+  NUM_WHEELS
+} Wheel_T;
+
+#define NUM_TEETH 27
+#define SUM_ALL_TEETH (NUM_TEETH * (NUM_TEETH + 1) / 2)
+#define CYCLES_PER_MICROSECOND 48
+
 #define WHEEL_SPEED_TIMEOUT_MS 100
 
-// 48 MHz (for 32 bit interrupts) = 48M cycles per second
-#define CYCLES_PER_MICROSECOND 48
 // Microsecond = 1 millionth of a second
 #define MICROSECONDS_PER_SECOND_F 1000000.0
 // 1000 millirevs = 1 rev
 #define MILLIREVS_PER_REV_F 1000.0
-// TODO count number of teeth on wheel
-#define CLICKS_PER_REV 27
 // Pointless comment to not break pattern
 #define SECONDS_PER_MINUTE 60
 
@@ -35,20 +41,18 @@ volatile uint32_t msTicks;
 
 // integers in [0:4294967296] representing the number of clock cycles between
 // ticks from wheel speed sensors
-volatile uint32_t wheel_1_clock_cycles_between_ticks = 0;
-volatile uint32_t wheel_2_clock_cycles_between_ticks = 0;
+volatile uint32_t last_tick[NUM_WHEELS][NUM_TEETH];
 
-uint32_t last_heartbeat_ms = 0;
+volatile uint32_t num_ticks[NUM_WHEELS];
+volatile uint64_t big_sum[NUM_WHEELS];
+volatile uint64_t little_sum[NUM_WHEELS];
+
+volatile bool disregard[NUM_WHEELS];
+
+volatile uint32_t last_updated[NUM_WHEELS];
+
 uint32_t last_wheel_speed_ms = 0;
-
-volatile uint32_t last_wheel_1_click = 0;
-volatile uint32_t last_wheel_2_click = 0;
-
-// We want to ensure the first click after a timeout is disregarded.
-// This prevents potential overflow of the timer causing a falsely-low
-// gap between clicks, which would give a falsely-high RPM.
-volatile bool wheel_1_disregard = false;
-volatile bool wheel_2_disregard = false;
+uint32_t last_heartbeat_ms = 0;
 
 static bool resettingPeripheral = false;
 
@@ -56,7 +60,7 @@ void can_read(void);
 void handle_can_error(Can_ErrorID_T error);
 Can_ErrorID_T write_can_heartbeat(void);
 Can_ErrorID_T write_can_wheel_speed(void);
-uint32_t click_time_to_mRPM(uint32_t click_time);
+uint32_t click_time_to_mRPM(uint32_t click_time_us);
 
 /*****************************************************************************/
 
@@ -67,31 +71,53 @@ void SysTick_Handler(void) {
 
 /****************************************************************************/
 
+void handle_interrupt(LPC_TIMER_T* timer, Wheel_T wheel) {
+  Chip_TIMER_Reset(timer);            /* Reset the timer immediately */
+  Chip_TIMER_ClearCapture(timer, 0);      /* Clear the capture */
+  const uint32_t curr_tick = Chip_TIMER_ReadCapture(timer, 0) / CYCLES_PER_MICROSECOND;
+
+  // Interrupt can now proceed
+
+  if (disregard[wheel]) {
+    num_ticks[wheel] = 0;
+    big_sum[wheel] = 0;
+    little_sum[wheel] = 0;
+    last_updated[wheel] = msTicks;
+    return;
+  }
+
+  const uint32_t count = num_ticks[wheel];
+  const uint8_t idx = count % NUM_TEETH;
+  const uint32_t this_tooth_last_rev =
+    count < NUM_TEETH ? 0 : last_tick[wheel][idx];
+
+  // Register tick
+  last_tick[wheel][idx] = curr_tick;
+  num_ticks[wheel]++;
+
+  // Update big sum
+  big_sum[wheel] += NUM_TEETH * curr_tick;
+  big_sum[wheel] -= little_sum[wheel];
+
+  // Update little sum
+  little_sum[wheel] += curr_tick;
+  little_sum[wheel] -= this_tooth_last_rev;
+
+  // Update timestamp
+  last_updated[wheel] = msTicks;
+}
+
 
 // Interrupt handler for timer 0 capture pin. This function get called automatically on
 // a rising edge of the signal going into the timer capture pin
 void TIMER32_0_IRQHandler(void) {
-  Chip_TIMER_Reset(LPC_TIMER32_0);            /* Reset the timer immediately */
-  Chip_TIMER_ClearCapture(LPC_TIMER32_0, 0);      /* Clear the capture */
-  if (wheel_1_disregard) {
-    wheel_1_clock_cycles_between_ticks = 0;
-  } else {
-    wheel_1_clock_cycles_between_ticks = Chip_TIMER_ReadCapture(LPC_TIMER32_0, 0);
-  }
-  last_wheel_1_click = msTicks;
+  handle_interrupt(LPC_TIMER32_0, RIGHT);
 }
 
 // Interrupt handler for timer 1 capture pin. This function get called automatically on
 // a rising edge of the signal going into the timer capture pin
 void TIMER32_1_IRQHandler(void) {
-  Chip_TIMER_Reset(LPC_TIMER32_1);            /* Reset the timer immediately */
-  Chip_TIMER_ClearCapture(LPC_TIMER32_1, 0);      /* Clear the capture */
-  if (wheel_2_disregard) {
-    wheel_2_clock_cycles_between_ticks = 0;
-  } else {
-    wheel_2_clock_cycles_between_ticks = Chip_TIMER_ReadCapture(LPC_TIMER32_1, 0);
-  }
-  last_wheel_2_click = msTicks;
+  handle_interrupt(LPC_TIMER32_1, LEFT);
 }
 
 void Set_Interrupt_Priorities(void) {
@@ -161,39 +187,53 @@ void handle_can_error(Can_ErrorID_T error) {
 
 Can_ErrorID_T write_can_wheel_speed(void) {
 
-    Can_RearCanNode_WheelSpeed_T msg;
+  Can_RearCanNode_WheelSpeed_T msg;
 
-    // Capture values
-    const uint32_t wheel_1_click_time = wheel_1_clock_cycles_between_ticks;
-    const uint32_t wheel_1_last_updated = last_wheel_1_click;
-    const uint32_t wheel_2_click_time = wheel_2_clock_cycles_between_ticks;
-    const uint32_t wheel_2_last_updated = last_wheel_2_click;
-
-    const bool wheel_1_timeout =
-      wheel_1_last_updated + WHEEL_SPEED_TIMEOUT_MS < msTicks;
-    const bool wheel_2_timeout =
-      wheel_2_last_updated + WHEEL_SPEED_TIMEOUT_MS < msTicks;
-
-    if (wheel_1_timeout || wheel_1_click_time == 0) {
-      msg.rear_right_wheel_speed_mRPM = 0;
-    } else {
-      msg.rear_right_wheel_speed_mRPM = click_time_to_mRPM(wheel_1_click_time);
+  uint8_t wheel;
+  for (wheel = 0; wheel < NUM_WHEELS; wheel++) {
+    uint32_t *ptr;
+    if (wheel == LEFT) {
+      ptr = &msg.rear_left_wheel_speed_mRPM;
+    } else if (wheel == RIGHT) {
+      ptr = &msg.rear_right_wheel_speed_mRPM;
     }
-    wheel_1_disregard = wheel_1_timeout;
 
-    if (wheel_2_timeout || wheel_2_click_time == 0) {
-      msg.rear_left_wheel_speed_mRPM = 0;
+    const uint32_t count = num_ticks[wheel];
+    uint8_t idx;
+    if (count > 0) {
+      // If there are x ticks so far, the last tick is index (x - 1)
+      idx = (count - 1) % NUM_TEETH;
     } else {
-      msg.rear_left_wheel_speed_mRPM = click_time_to_mRPM(wheel_2_click_time);
+      idx = 0;
     }
-    wheel_2_disregard = wheel_2_timeout;
 
-    Serial_Print("Left: ");
-    Serial_PrintNumber(msg.rear_left_wheel_speed_mRPM, 10);
-    Serial_Print(", Right: ");
-    Serial_PrintlnNumber(msg.rear_right_wheel_speed_mRPM, 10);
+    const uint32_t tick_time = last_tick[wheel][idx];
 
-    return Can_RearCanNode_WheelSpeed_Write(&msg);
+    uint32_t moving_avg_us = 0;
+    if (count >= NUM_TEETH) {
+      moving_avg_us = big_sum[wheel] / SUM_ALL_TEETH;
+    }
+
+    const bool timeout =
+      last_updated[wheel] + WHEEL_SPEED_TIMEOUT_MS < msTicks;
+    disregard[wheel] = timeout;
+
+    bool wheel_stopped = timeout || count == 0;
+    if (wheel_stopped) {
+      *ptr = 0;
+    } else if (count < NUM_TEETH) {
+      *ptr = click_time_to_mRPM(tick_time);
+    } else {
+      *ptr = click_time_to_mRPM(moving_avg_us);
+    }
+  }
+
+  Serial_Print("Left: ");
+  Serial_PrintNumber(msg.rear_left_wheel_speed_mRPM, 10);
+  Serial_Print(", Right: ");
+  Serial_PrintlnNumber(msg.rear_right_wheel_speed_mRPM, 10);
+
+  return Can_RearCanNode_WheelSpeed_Write(&msg);
 }
 
 Can_ErrorID_T write_can_heartbeat(void) {
@@ -202,9 +242,8 @@ Can_ErrorID_T write_can_heartbeat(void) {
     return Can_RearCanNode_Heartbeat_Write(&msg);
 }
 
-uint32_t click_time_to_mRPM(uint32_t cycles_per_click) {
-  const float us_per_click = cycles_per_click * 1.0 / CYCLES_PER_MICROSECOND;
-  const float us_per_rev = us_per_click * CLICKS_PER_REV;
+uint32_t click_time_to_mRPM(uint32_t us_per_click) {
+  const float us_per_rev = us_per_click * 1.0 * NUM_TEETH;
 
   const float s_per_rev = us_per_rev / MICROSECONDS_PER_SECOND_F;
 
