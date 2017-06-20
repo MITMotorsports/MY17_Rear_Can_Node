@@ -2,3 +2,4 @@ bin/
 testbin/
 *.swp
 *.DS_Store
+compile_commands.json
